@@ -1764,6 +1764,7 @@ static PaError TestParameters( const PaUtilHostApiRepresentation *hostApi, const
     unsigned int numHostChannels;
     PaSampleFormat hostFormat;
     snd_pcm_hw_params_t *hwParams;
+    snd_pcm_uframes_t limitation;
     alsa_snd_pcm_hw_params_alloca( &hwParams );
 
     if( !parameters->hostApiSpecificStreamInfo )
@@ -1797,6 +1798,19 @@ static PaError TestParameters( const PaUtilHostApiRepresentation *hostApi, const
 
     /* Some specific hardware (reported: Audio8 DJ) can fail with assertion during this step. */
     ENSURE_( alsa_snd_pcm_hw_params_set_format( pcm, hwParams, Pa2AlsaFormat( hostFormat ) ), paUnanticipatedHostError );
+
+    /*
+     * Intel HDA driver doesn't set PCM rule to limit maximum size of buffer.
+     * This brings request for too large buffer size and causes memory allocation
+     * error in ALSA PCM core, at least Linux kernel 5.8. As a workaround, limit
+     * buffer size up to 10 msec.
+     */
+    limitation = alsa_snd_pcm_format_size(SND_PCM_FORMAT_S16_LE, 48000 * 2 / 100);
+    if( alsa_snd_pcm_hw_params_set_buffer_size_near( pcm, hwParams, &limitation ) < 0 )
+    {
+        result = paBufferTooBig;
+        goto error;
+    }
 
     {
         /* It happens that this call fails because the device is busy */
