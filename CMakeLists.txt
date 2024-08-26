@@ -5,11 +5,45 @@ project(PortAudio VERSION 19.8)
 # General PortAudio stuff
 #
 
-option(BUILD_SHARED_LIBS "Build dynamic library" ON)
+option(PA_BUILD_SHARED_LIBS "Build dynamic library" ${BUILD_SHARED_LIBS})
 option(PA_BUILD_TESTS "Include test projects" OFF)
 option(PA_BUILD_EXAMPLES "Include example projects" OFF)
 
+if(PA_BUILD_SHARED_LIBS)
+  set(LIBRARY_BUILD_TYPE SHARED)
+else()
+  set(LIBRARY_BUILD_TYPE STATIC)
+endif()
+
+option(PA_WARNINGS_ARE_ERRORS "Turn compiler warnings into errors" OFF)
+if(PA_WARNINGS_ARE_ERRORS)
+    if(MSVC)
+        add_compile_options(/WX
+            # "Grandfathered" warnings that existed before we started enforcement.
+            # Do *NOT* add warnings to this list. Instead, fix your code so that it doesn't produce the warning.
+            # TODO: fix the offending code so that we don't have to exclude specific warnings anymore.
+            /wd4244 # W2 conversion possible loss of data
+            /wd4267 # W3 conversion possible loss of data
+            /wd4996 # W3 unsafe/deprecated
+        )
+    else()
+        add_compile_options(-Werror
+            # "Grandfathered" warnings that existed before we started enforcement.
+            # Do *NOT* add warnings to this list. Instead, fix your code so that it doesn't produce the warning.
+            # TODO: fix the offending code so that we don't have to exclude specific warnings anymore.
+            -Wno-error=deprecated-declarations  # https://github.com/PortAudio/portaudio/issues/213 https://github.com/PortAudio/portaudio/issues/641
+            -Wno-error=stringop-overflow
+        )
+        if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+             # Don't fail on older clang versions that don't recognize the latest warnings in the list above.
+             # Note that unrecognized warning options are not a fatal error on GCC, and in fact, GCC will choke on this option. Hence the conditional.
+            add_compile_options(-Wno-error=unknown-warning-option)
+        endif()
+    endif()
+endif()
+
 add_library(PortAudio
+  ${LIBRARY_BUILD_TYPE}
   src/common/pa_allocation.c
   src/common/pa_allocation.h
   src/common/pa_converters.c
@@ -65,7 +99,7 @@ else()
   target_compile_definitions(PortAudio PRIVATE PA_LITTLE_ENDIAN)
 endif()
 
-if(WIN32 AND MSVC AND BUILD_SHARED_LIBS
+if(WIN32 AND MSVC AND PA_BUILD_SHARED_LIBS
   # Check if the user is building PortAudio stand-alone or as part of a larger
   # project. If this is part of a larger project (i.e. the CMakeLists.txt has
   # been imported by some other CMakeLists.txt), we don't want to override
@@ -105,8 +139,13 @@ find_package(JACK)
 cmake_dependent_option(PA_USE_JACK "Enable support for JACK Audio Connection Kit" ON JACK_FOUND OFF)
 if(PA_USE_JACK)
   target_link_libraries(PortAudio PRIVATE JACK::jack)
-  target_sources(PortAudio PRIVATE src/hostapi/jack/pa_jack.c)
+  target_sources(PortAudio PRIVATE
+    src/hostapi/jack/pa_jack.c
+    src/os/unix/pa_pthread_util.c
+    src/os/unix/pa_pthread_util.h
+  )
   set(PORTAUDIO_PUBLIC_HEADERS "${PORTAUDIO_PUBLIC_HEADERS}" include/pa_jack.h)
+  target_include_directories(PortAudio PRIVATE src/os/unix) # for pa_pthread_util.h
   target_compile_definitions(PortAudio PUBLIC PA_USE_JACK=1)
   set(PKGCONFIG_CFLAGS "${PKGCONFIG_CFLAGS} -DPA_USE_JACK=1")
   set(PKGCONFIG_REQUIRES_PRIVATE "${PKGCONFIG_REQUIRES_PRIVATE} jack")
@@ -123,6 +162,8 @@ if(WIN32)
     src/os/win/pa_win_hostapis.c
     src/os/win/pa_win_util.c
     src/os/win/pa_win_util.h
+    src/os/win/pa_win_version.c
+    src/os/win/pa_win_version.h
     src/os/win/pa_win_waveformat.c
     src/os/win/pa_win_wdmks_utils.h
     src/os/win/pa_x86_plain_converters.h
@@ -243,7 +284,7 @@ if(WIN32)
     target_compile_definitions(PortAudio PRIVATE PAWIN_USE_WDMKS_DEVICE_INFO)
   endif()
 
-  if(BUILD_SHARED_LIBS)
+  if(PA_BUILD_SHARED_LIBS)
     configure_file(cmake/portaudio.def.in "${CMAKE_CURRENT_BINARY_DIR}/portaudio.def" @ONLY)
     target_sources(PortAudio PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/portaudio.def")
   endif()
@@ -252,6 +293,8 @@ elseif(UNIX)
     src/os/unix/pa_unix_hostapis.c
     src/os/unix/pa_unix_util.c
     src/os/unix/pa_unix_util.h
+    src/os/unix/pa_pthread_util.c
+    src/os/unix/pa_pthread_util.h
   )
   target_include_directories(PortAudio PRIVATE src/os/unix)
   target_link_libraries(PortAudio PRIVATE m)
@@ -271,17 +314,13 @@ elseif(UNIX)
     target_include_directories(PortAudio PRIVATE src/hostapi/coreaudio)
     set(PORTAUDIO_PUBLIC_HEADERS "${PORTAUDIO_PUBLIC_HEADERS}" include/pa_mac_core.h)
 
-    find_library(COREAUDIO_LIBRARY CoreAudio REQUIRED)
-    find_library(AUDIOTOOLBOX_LIBRARY AudioToolbox REQUIRED)
-    find_library(AUDIOUNIT_LIBRARY AudioUnit REQUIRED)
-    find_library(COREFOUNDATION_LIBRARY CoreFoundation REQUIRED)
-    find_library(CORESERVICES_LIBRARY CoreServices REQUIRED)
-    target_link_libraries(PortAudio PRIVATE
-      "${COREAUDIO_LIBRARY}"
-      "${AUDIOTOOLBOX_LIBRARY}"
-      "${AUDIOUNIT_LIBRARY}"
-      "${COREFOUNDATION_LIBRARY}"
-      "${CORESERVICES_LIBRARY}"
+    target_link_libraries(PortAudio 
+      PRIVATE
+        -Wl,-framework,CoreAudio
+        -Wl,-framework,AudioToolbox
+        -Wl,-framework,AudioUnit
+        -Wl,-framework,CoreFoundation
+        -Wl,-framework,CoreServices
     )
     target_compile_definitions(PortAudio PUBLIC PA_USE_COREAUDIO=1)
     set(PKGCONFIG_CFLAGS "${PKGCONFIG_CFLAGS} -DPA_USE_COREAUDIO=1")
@@ -296,7 +335,6 @@ elseif(UNIX)
     find_package(ALSA)
     cmake_dependent_option(PA_USE_ALSA "Enable support for ALSA" ON ALSA_FOUND OFF)
     if(PA_USE_ALSA)
-      target_link_libraries(PortAudio PRIVATE "${ALSA_LIBRARIES}")
       target_sources(PortAudio PRIVATE src/hostapi/alsa/pa_linux_alsa.c)
       set(PORTAUDIO_PUBLIC_HEADERS "${PORTAUDIO_PUBLIC_HEADERS}" include/pa_linux_alsa.h)
       target_compile_definitions(PortAudio PUBLIC PA_USE_ALSA=1)
@@ -308,6 +346,7 @@ elseif(UNIX)
         target_link_libraries(PortAudio PRIVATE "${CMAKE_DL_LIBS}")
         set(PKGCONFIG_LDFLAGS_PRIVATE "${PKGCONFIG_LDFLAGS_PRIVATE} -l${CMAKE_DL_LIBS}")
       else()
+        target_link_libraries(PortAudio PRIVATE "${ALSA_LIBRARIES}")
         set(PKGCONFIG_REQUIRES_PRIVATE "${PKGCONFIG_REQUIRES_PRIVATE} alsa")
       endif()
     endif()
@@ -333,7 +372,39 @@ elseif(UNIX)
       target_compile_definitions(PortAudio PUBLIC PA_USE_AUDIOIO=1)
       set(PKGCONFIG_CFLAGS "${PKGCONFIG_CFLAGS} -DPA_USE_AUDIOIO=1")
     endif()
+
+    find_package(PulseAudio)
+    cmake_dependent_option(PA_USE_PULSEAUDIO "Enable support for PulseAudio general purpose sound server" ON PulseAudio_FOUND OFF)
+    if(PA_USE_PULSEAUDIO)
+      target_link_libraries(PortAudio PRIVATE PulseAudio::PulseAudio)
+      target_sources(PortAudio PRIVATE
+        src/hostapi/pulseaudio/pa_linux_pulseaudio_block.c
+        src/hostapi/pulseaudio/pa_linux_pulseaudio.c
+        src/hostapi/pulseaudio/pa_linux_pulseaudio_cb.c)
+
+      target_compile_definitions(PortAudio PUBLIC PA_USE_PULSEAUDIO=1)
+      set(PKGCONFIG_CFLAGS "${PKGCONFIG_CFLAGS} -DPA_USE_PULSEAUDIO=1")
+      set(PKGCONFIG_REQUIRES_PRIVATE "${PKGCONFIG_REQUIRES_PRIVATE} libpulse")
+
+      # needed for PortAudioConfig.cmake so `find_package(PortAudio)` works in downstream projects
+      install(FILES cmake/modules/FindPulseAudio.cmake DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/portaudio/modules")
+    endif()
+
+    pkg_check_modules(SNDIO sndio)
+    cmake_dependent_option(PA_USE_SNDIO "Enable support for sndio" ON SNDIO_FOUND OFF)
+    if(PA_USE_SNDIO)
+      target_link_libraries(PortAudio PRIVATE "${SNDIO_LIBRARIES}")
+      target_sources(PortAudio PRIVATE src/hostapi/sndio/pa_sndio.c)
+      target_compile_definitions(PortAudio PUBLIC PA_USE_SNDIO=1)
+      set(PKGCONFIG_CFLAGS "${PKGCONFIG_CFLAGS} -DPA_USE_SNDIO=1")
+      set(PKGCONFIG_REQUIRES_PRIVATE "${PKGCONFIG_REQUIRES_PRIVATE} sndio")
+    endif()
   endif()
+endif()
+
+# Make sure PA_USE_ALSA is available as it is used for PortAudioConfig.cmake configuration
+if (NOT PA_USE_ALSA)
+    set(PA_USE_ALSA OFF)
 endif()
 
 # Add public headers to sources of PortAudio (used by some IDEs to list them in project tree)
@@ -406,7 +477,7 @@ install(TARGETS PortAudio
 
 # Some of the tests and examples use private symbols which are not
 # exposed by the .def file on Windows.
-if(WIN32 AND BUILD_SHARED_LIBS)
+if(WIN32 AND PA_BUILD_SHARED_LIBS)
   set(LINK_PRIVATE_SYMBOLS OFF)
 else()
   set(LINK_PRIVATE_SYMBOLS ON)
